@@ -9,7 +9,6 @@ Antes de executar o código, você precisará ter os seguintes pré-requisitos i
 - Python (versão utilizada: 3.7+)
 - Bibliotecas Python: cv2, mediapipe, keras, numpy
 - TensorFlow (versão utilizada: 2.9.1)
-- Jupyter Notebook (ou ambiente equivalente)
 
 ## Como usar
 
@@ -164,3 +163,34 @@ python3 train.py --data-dir dataset --epochs 15 --batch-size 32
 Notas:
 - Use `--symlink` para criar links simbólicos em vez de copiar arquivos (mais rápido e economiza espaço).
 - Se o dataset vier em outro layout, especifique `--csv-path/--images-dir` e os nomes das colunas no CSV.
+
+## Capturar seu próprio dataset com a webcam
+
+Você pode usar a webcam para capturar rapidamente imagens e criar um dataset no formato esperado (`dataset/<classe>/imagem.jpg`) com o utilitário `capture_dataset.py`.
+
+Exemplos:
+
+```bash
+# Captura 50 imagens da classe "A" para dataset/A/
+python3 capture_dataset.py --label A --count 50 --out-dir dataset --resize 224
+
+# Começa com 3s de contagem regressiva, tira 100 fotos, intervalo de 0.4s
+python3 capture_dataset.py --label B --count 100 --interval 0.4 --start-delay 3 --resize 224
+
+# Tenta recortar automaticamente a mão usando MediaPipe (se instalado)
+python3 capture_dataset.py --label C --hand-crop --resize 224
+
+# Define um ROI manual (x,y,w,h) e espelha imagem (selfie)
+python3 capture_dataset.py --label D --roi 100,120,300,300 --mirror --resize 224
+```
+
+Atalhos de teclado durante a captura:
+- `q`: sair
+- `space`: pausar/retomar a captura automática
+- `s`: salvar uma foto manualmente (útil para ajustes finos)
+
+Observações:
+- O `--resize 224` garante imagens quadradas prontas para o treino com MobileNetV2, mas é opcional
+	(o `train.py` também redimensiona ao carregar). Manter uma resolução consistente ajuda.
+- Para melhores resultados, mantenha o enquadramento similar entre classes (distância, iluminação, fundo).
+- Capture variações (ângulos, pequenas rotações, posições) para melhorar a robustez do modelo.

@@ -48,8 +48,21 @@ frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 frame_rate = int(cap.get(cv2.CAP_PROP_FPS)) or 30
 
 output_video_path = 'output_video.mp4'
-fourcc = cv2.VideoWriter_fourcc(*'XVID')
+# Escolhe fourcc apropriado baseado na extensão (XVID costuma ser para .avi; mp4 -> mp4v)
+ext = os.path.splitext(output_video_path)[1].lower()
+if ext in ('.mp4', '.m4v'):
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+elif ext in ('.avi',):
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+else:
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
 out = cv2.VideoWriter(output_video_path, fourcc, frame_rate, (frame_width, frame_height))
+if not out.isOpened():
+    print(f"Aviso: não foi possível abrir VideoWriter para '{output_video_path}'. O arquivo pode não ser salvo.")
+    out = None
+else:
+    print(f"VideoWriter aberto com sucesso -> {output_video_path} (codec={fourcc}, fps={frame_rate}, size=({frame_width},{frame_height}))")
 
 while True:
     ret, frame = cap.read()
@@ -105,8 +118,8 @@ while True:
                     else:
                         label = str(indexVal)
 
-                    # Mostra label: acima do threshold (vermelho), abaixo (opcional em laranja)
-                    text = f"{label} ({conf:.2f})"
+                    # Mostra apenas o label (sem a parte numérica/confiança)
+                    text = label
                     if conf >= CONF_THRESHOLD:
                         color = (0, 0, 255)  # vermelho
                         cv2.putText(frame, text, (x1, max(y1 - 10, 20)),
@@ -121,12 +134,23 @@ while True:
 
     # mostra o frame processado
     cv2.imshow("Frame", frame)
-    out.write(frame)
+    if out is not None:
+        try:
+            out.write(frame)
+        except Exception as e:
+            # Não interrompe o laço apenas por falha de escrita; loga o erro
+            print("Erro ao escrever frame no arquivo de saída:", e)
 
     # pressione 'q' para sair
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
-out.release()
+if out is not None:
+    out.release()
+    try:
+        size = os.path.getsize(output_video_path)
+        print(f"Arquivo de saída salvo: {output_video_path} ({size} bytes)")
+    except Exception:
+        print(f"Arquivo de saída liberado: {output_video_path}")
 cv2.destroyAllWindows()

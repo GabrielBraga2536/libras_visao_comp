@@ -207,4 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 /dataset
+/dataset_asl
 /py_env_3_10
+/.~lock.eval_metrics.csv#
+/output_video.mp4

@@ -30,6 +30,8 @@ import argparse
 import os
 from typing import Tuple
 
+import numpy as np
+
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
@@ -67,14 +69,31 @@ def build_datasets(data_dir: str, img_size: int, batch_size: int, val_split: flo
     return train_ds, val_ds, class_names
 
 
-def build_model(num_classes: int, img_size: int, dropout: float = 0.2) -> tf.keras.Model:
+def build_model(num_classes: int, img_size: int, dropout: float = 0.2,
+                use_augmentation: bool = True, flip: bool = False) -> tf.keras.Model:
     base = tf.keras.applications.MobileNetV2(
         input_shape=(img_size, img_size, 3), include_top=False, weights='imagenet')
     base.trainable = False
 
     inputs = keras.Input(shape=(img_size, img_size, 3))
+
+    # Data augmentation (aplicado apenas em treino). Evitamos flip horizontal por padrão,
+    # pois pode inverter lateralidade de sinais; pode ser ligado com --flip.
+    if use_augmentation:
+        aug_layers = [
+            layers.RandomRotation(0.08),
+            layers.RandomZoom(0.1),
+            layers.RandomTranslation(0.1, 0.1),
+            layers.RandomContrast(0.1),
+        ]
+        if flip:
+            aug_layers.insert(0, layers.RandomFlip("horizontal"))
+        x = keras.Sequential(aug_layers, name="augment")(inputs)
+    else:
+        x = inputs
+
     # Normalização compatível com libras.py
-    x = tf.keras.applications.mobilenet_v2.preprocess_input(inputs)
+    x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
     x = base(x, training=False)
     x = layers.GlobalAveragePooling2D()(x)
     if dropout and dropout > 0:
@@ -110,6 +129,31 @@ def unfreeze_last_n_layers(model: tf.keras.Model, n_layers: int, base_name: str 
             l.trainable = True
 
 
+def count_files_per_class(data_dir: str, class_names: list[str]) -> dict:
+    counts = {}
+    for cls in class_names:
+        cls_dir = os.path.join(data_dir, cls)
+        n = 0
+        if os.path.isdir(cls_dir):
+            for root, _, files in os.walk(cls_dir):
+                for fn in files:
+                    # conta qualquer arquivo; assumimos que diretórios tem apenas imagens válidas
+                    if not fn.startswith('.'):
+                        n += 1
+        counts[cls] = n
+    return counts
+
+
+def make_class_weight(class_counts: dict, class_names: list[str]) -> dict:
+    # Pesos inversamente proporcionais à frequência
+    counts = np.array([class_counts.get(c, 0) for c in class_names], dtype=np.float32)
+    counts = np.maximum(counts, 1.0)
+    total = float(np.sum(counts))
+    num_classes = len(class_names)
+    weights = total / (counts * num_classes)
+    return {i: float(w) for i, w in enumerate(weights)}
+
+
 def train(args):
     train_ds, val_ds, class_names = build_datasets(
         data_dir=args.data_dir,
@@ -123,10 +167,22 @@ def train(args):
     num_classes = len(class_names)
     print("Classes:", class_names)
 
-    model = build_model(num_classes=num_classes, img_size=args.img_size, dropout=args.dropout)
+    # Class weights para lidar com desbalanceamento
+    class_counts = count_files_per_class(args.data_dir, class_names)
+    class_weight = make_class_weight(class_counts, class_names)
+    print("Amostras por classe:", class_counts)
+    print("Pesos por classe:", class_weight)
+
+    model = build_model(
+        num_classes=num_classes,
+        img_size=args.img_size,
+        dropout=args.dropout,
+        use_augmentation=not args.no_augment,
+        flip=args.flip,
+    )
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=args.lr),
-        loss='categorical_crossentropy',
+        loss=keras.losses.CategoricalCrossentropy(label_smoothing=args.label_smoothing),
         metrics=['accuracy'],
     )
 
@@ -151,6 +207,7 @@ def train(args):
         validation_data=val_ds,
         epochs=args.epochs,
         callbacks=callbacks,
+        class_weight=class_weight,
         verbose=1,
     )
 
@@ -160,7 +217,7 @@ def train(args):
         unfreeze_last_n_layers(model, n_layers=args.fine_tune)
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=max(args.lr * 0.1, 1e-6)),
-            loss='categorical_crossentropy',
+            loss=keras.losses.CategoricalCrossentropy(label_smoothing=args.label_smoothing),
             metrics=['accuracy'],
         )
         history_ft = model.fit(
@@ -168,6 +225,7 @@ def train(args):
             validation_data=val_ds,
             epochs=args.ft_epochs,
             callbacks=callbacks,
+            class_weight=class_weight,
             verbose=1,
         )
 
@@ -186,6 +244,12 @@ def train(args):
 
     print("Treino concluído. Modelo (melhor val_accuracy):", args.output_model)
 
+    # Avaliação e relatório (matriz de confusão e métricas por classe)
+    try:
+        evaluate_and_report(model, val_ds, class_names, prefix=args.report_prefix)
+    except Exception as e:
+        print("Falha ao gerar relatório de avaliação:", e)
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Treinar modelo Keras para reconhecimento de gestos/letras")
@@ -198,11 +262,82 @@ def parse_args():
     p.add_argument('--fine-tune', type=int, default=0, help='Qtde de camadas finais do backbone a destravar')
     p.add_argument('--dropout', type=float, default=0.2)
     p.add_argument('--lr', type=float, default=1e-3)
+    p.add_argument('--label-smoothing', type=float, default=0.1)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--output-model', default='keras_model.h5')
     p.add_argument('--output-labels', default='labels.txt')
     p.add_argument('--save-final', action='store_true', help='Também salva o estado final do modelo em *_final.h5')
+    p.add_argument('--no-augment', action='store_true', help='Desativa data augmentation')
+    p.add_argument('--flip', action='store_true', help='Ativa RandomFlip horizontal na augmentation (cuidado com lateralidade)')
+    p.add_argument('--report-prefix', default='eval', help='Prefixo para arquivos de relatório (ex.: eval_confusion_matrix.png)')
     return p.parse_args()
+
+
+def evaluate_and_report(model: tf.keras.Model, val_ds: tf.data.Dataset, class_names: list[str], prefix: str = 'eval'):
+    """Gera matriz de confusão e métricas por classe usando o conjunto de validação."""
+    import matplotlib.pyplot as plt
+
+    # Coleta rótulos verdadeiros e predições
+    y_true = []
+    for _, y in val_ds:
+        y_true.append(y.numpy())
+    y_true = np.concatenate(y_true, axis=0)
+    y_true_lbl = np.argmax(y_true, axis=1)
+
+    y_pred = model.predict(val_ds, verbose=0)
+    if isinstance(y_pred, list):
+        y_pred = y_pred[0]
+    y_pred_lbl = np.argmax(y_pred, axis=1)
+
+    num_classes = len(class_names)
+    cm = tf.math.confusion_matrix(y_true_lbl, y_pred_lbl, num_classes=num_classes).numpy()
+
+    # Métricas por classe (precisão, revocação, F1)
+    tp = np.diag(cm).astype(np.float32)
+    support_true = cm.sum(axis=1).astype(np.float32)  # por classe (linhas)
+    support_pred = cm.sum(axis=0).astype(np.float32)  # por classe (colunas)
+    precision = np.divide(tp, np.maximum(support_pred, 1), where=support_pred>0)
+    recall = np.divide(tp, np.maximum(support_true, 1), where=support_true>0)
+    f1 = np.divide(2*precision*recall, np.maximum(precision+recall, 1e-8))
+
+    # Salva matriz de confusão como imagem
+    fig, ax = plt.subplots(figsize=(10, 9))
+    im = ax.imshow(cm, cmap='Blues')
+    ax.set_title('Matriz de Confusão (validação)')
+    ax.set_xlabel('Predito')
+    ax.set_ylabel('Verdadeiro')
+    ax.set_xticks(range(num_classes))
+    ax.set_yticks(range(num_classes))
+    ax.set_xticklabels(class_names, rotation=90)
+    ax.set_yticklabels(class_names)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    out_png = f"{prefix}_confusion_matrix.png"
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+    print("Matriz de confusão salva em:", out_png)
+
+    # Salva métricas por classe em CSV
+    out_csv = f"{prefix}_metrics.csv"
+    with open(out_csv, 'w', encoding='utf-8') as f:
+        f.write('class,precision,recall,f1,support_true,support_pred\n')
+        for i, name in enumerate(class_names):
+            f.write(f"{name},{precision[i]:.4f},{recall[i]:.4f},{f1[i]:.4f},{int(support_true[i])},{int(support_pred[i])}\n")
+    print("Métricas por classe salvas em:", out_csv)
+
+    # Principais confusões (pares fora da diagonal)
+    cm_copy = cm.copy()
+    np.fill_diagonal(cm_copy, 0)
+    flat_indices = np.dstack(np.unravel_index(np.argsort(cm_copy.ravel())[::-1], cm_copy.shape))[0]
+    print("Top confusões (verdadeiro -> predito : contagem):")
+    shown = 0
+    for i, j in flat_indices:
+        if cm[i, j] <= 0:
+            break
+        print(f" - {class_names[i]} -> {class_names[j]} : {cm[i, j]}")
+        shown += 1
+        if shown >= 10:
+            break
 
 
 if __name__ == '__main__':
